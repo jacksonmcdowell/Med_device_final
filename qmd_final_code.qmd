@@ -1,0 +1,407 @@
+---
+title: "Med Device Topic Sepecialization"
+author: "Jackson McDowell"
+format:
+  html:
+    toc: true
+    toc-location: left
+    self-contained: true
+jupyter: python3
+---
+
+```{python}
+
+import numpy as np
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import re
+from urllib.parse import urljoin, urlparse
+import time, random
+import lda
+from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
+```
+
+Zimmer scraping
+Scraped the product and solution pages. Extracted a product name and a short description. I keep only rows with enough text to be useful for topic modeling.
+```{python}
+#| eval: false
+headers = {"User-Agent": "Mozilla/5.0"}
+
+company = "Zimmer Biomet"
+start_url = "https://www.zimmerbiomet.com/en/products-and-solutions.html"
+
+r = requests.get(start_url, headers=headers)
+soup = BeautifulSoup(r.text, "html.parser")
+
+
+links = []
+for a in soup.select("a[href]"):
+    href = a.get("href", "").strip()
+    full = urljoin(start_url, href)
+
+    if urlparse(full).netloc != "www.zimmerbiomet.com":
+        continue
+
+    if any(x in full.lower() for x in ["products-and-solutions", "product", "solutions"]) and "#" not in full:
+        links.append(full)
+
+links = list(dict.fromkeys(links))
+
+print("Links found:", len(links))
+
+products = []
+##80 was a good balance of runtime and variety of products, I was still able to notice a pattern with this number. This reasoning is the same for all the slicing I did with other websites. 
+for url in links[:80]: 
+    try:
+        rr = requests.get(url, headers=headers, timeout=20)
+        ss = BeautifulSoup(rr.text, "html.parser")
+
+        h1 = ss.select_one("h1")
+        name = h1.get_text(strip=True) if h1 else ss.title.get_text(strip=True)
+
+        meta = ss.select_one("meta[name='description']")
+        desc = meta.get("content", "").strip() if meta else ""
+
+        if not desc:
+            main = ss.select_one("main") or ss
+            p = main.select_one("p")
+            desc = p.get_text(" ", strip=True) if p else ""
+
+        if name and len(name) >= 4 and len(desc) >= 20:
+            products.append({
+                "company": company,
+                "product": name,
+                "description": desc,
+                "url": url
+            })
+
+    except Exception:
+        continue
+
+df = pd.DataFrame(products)
+
+df = df.drop_duplicates(subset=["company", "product"])
+
+if "url" in df.columns:
+    df = df.drop(columns=["url"])
+
+df = df[df["description"].str.len() > 40]
+
+df["text"] = (df["product"] + " " + df["description"]).str.lower()
+
+df = df.reset_index(drop=True)
+
+print(df.head())
+print("Rows:", len(df))
+
+df.to_csv("zimmer_products_clean.csv", index=False)
+
+```
+
+```{python}
+import pandas as pd
+
+df = pd.read_csv("zimmer_products_clean.csv")
+df.head()
+```
+
+Stryker
+I filtered out non-product pages (careers, investors, policies, etc.), sample a subset for runtime, and extract names + descriptions. This website had a lot of broad coverage. I also kept only rows with enough text to be useful for topic modeling.
+
+```{python}
+#| eval: false
+headers = {"User-Agent": "Mozilla/5.0"}
+
+company = "Stryker"
+start_url = "https://www.stryker.com/us/en/site-map.html"
+
+r = requests.get(start_url, headers=headers, timeout=20)
+soup = BeautifulSoup(r.text, "html.parser")
+
+#links that look like product pages
+links = []
+for a in soup.select("a[href]"):
+    href = a.get("href", "").strip()
+    full = urljoin(start_url, href)
+
+    if urlparse(full).netloc != "www.stryker.com":
+        continue
+
+    full_l = full.lower()
+
+    if any(bad in full_l for bad in [
+        "product-inquiry", "contact", "careers", "investors",
+        "privacy", "terms", "/about/", "/news/", "/events/",
+        "/training", "/services/", "/company", "/locations"
+    ]):
+        continue
+
+    if any(x in full_l for x in [
+        "/products", "implant", "system", "platform", "instrument"
+    ]) and "#" not in full:
+        links.append(full)
+
+links = list(dict.fromkeys(links))
+print("Links found:", len(links))
+
+random.seed(1)
+links = random.sample(links, min(120, len(links)))
+
+products = []
+
+for url in links:
+    try:
+        time.sleep(random.uniform(.1, .4))
+
+        rr = requests.get(url, headers=headers, timeout=20)
+        ss = BeautifulSoup(rr.text, "html.parser")
+
+        h1 = ss.select_one("h1")
+        name = h1.get_text(strip=True) if h1 else (ss.title.get_text(strip=True) if ss.title else "")
+
+        if len(name.split()) <= 1:
+            continue
+
+        meta = ss.select_one("meta[name='description']")
+        desc = meta.get("content", "").strip() if meta else ""
+
+        if not desc:
+            og = ss.select_one("meta[property='og:description']")
+            desc = og.get("content", "").strip() if og else ""
+
+        if not desc:
+            main = ss.select_one("main") or ss
+            p = main.select_one("p")
+            desc = p.get_text(" ", strip=True) if p else ""
+
+        if name and len(name) >= 4 and len(desc) >= 20:
+            products.append({
+                "company": company,
+                "product": name,
+                "description": desc,
+                "url": url
+            })
+
+    except Exception:
+        continue
+
+df = pd.DataFrame(products)
+
+df["product"] = df["product"].str.replace("| Stryker","", regex=False)
+
+
+
+df = df.drop_duplicates(subset=["company", "product"])
+
+if "url" in df.columns:
+    df = df.drop(columns=["url"])
+
+df = df[df["description"].astype(str).str.len() > 40]
+
+df["text"] = (df["product"].astype(str) + " " + df["description"].astype(str)).str.lower()
+
+df = df.reset_index(drop=True)
+
+print(df.head())
+print("Rows:", len(df))
+
+df.to_csv("stryker_no_noise_2.csv", index=False)
+```
+
+```{python}
+import pandas as pd
+df = pd.read_csv("stryker_no_noise_2.csv")
+df.head()
+```
+
+
+Olympus
+Organizes products by category pages. I collect category links, then collect individual product links from those categories, and extract product name + description.
+
+```{python}
+#| eval: false
+headers = {"User-Agent": "Mozilla/5.0"}
+
+company = "Olympus"
+start_url = "https://medical.olympusamerica.com/products"
+
+r = requests.get(start_url, headers=headers)
+soup = BeautifulSoup(r.text, "html.parser")
+
+category_links = []
+
+for a in soup.select("a[href]"):
+    href = a.get("href","")
+    full = urljoin(start_url, href)
+
+    if "/products/" in full and "#" not in full:
+        category_links.append(full)
+
+category_links = list(set(category_links))
+print("Category pages:", len(category_links))
+
+
+product_links = []
+
+for cat in category_links:
+    try:
+        rr = requests.get(cat, headers=headers)
+        ss = BeautifulSoup(rr.text,"html.parser")
+
+        for a in ss.select("a[href]"):
+            href = a.get("href","")
+            full = urljoin(cat, href)
+
+            if "/products/" in full and full != cat:
+                product_links.append(full)
+
+    except:
+        pass
+
+product_links = list(set(product_links))
+print("Product pages:", len(product_links))
+
+
+products = []
+
+for url in product_links:
+    try:
+        time.sleep(random.uniform(.2,.5))
+
+        rr = requests.get(url, headers=headers)
+        ss = BeautifulSoup(rr.text,"html.parser")
+
+        h1 = ss.select_one("h1")
+        name = h1.get_text(strip=True) if h1 else ""
+
+        meta = ss.select_one("meta[name='description']")
+        desc = meta.get("content","").strip() if meta else ""
+
+        if not desc:
+            p = ss.select_one("p")
+            desc = p.get_text(" ", strip=True) if p else ""
+
+        if len(name) > 3 and len(desc) > 25:
+            products.append({
+                "company": company,
+                "product": name,
+                "description": desc
+            })
+
+    except:
+        pass
+
+df = pd.DataFrame(products)
+
+df = df[~df["product"].str.contains("standard|innovation|solutions", case=False, na=False)]
+
+df = df.drop_duplicates()
+
+df["text"] = (df["product"] + " " + df["description"]).str.lower()
+
+print("Rows:", len(df))
+
+df.to_csv("olympus_clean_3.csv", index=False)
+
+```
+
+```{python}
+import pandas as pd
+df = pd.read_csv("olympus_clean_3.csv")
+df.head()
+```
+
+I combined the cleaned company datasets into one file for the topic model.
+
+```{python}
+import glob
+
+folder = r"C:\Users\JacksonMcDowell\Desktop\Unstructured\final_data"
+
+files = glob.glob(folder + r"\*.csv")
+
+df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+
+df.to_csv(folder + r"\combined_med_device.csv", index=False)
+
+print("Combined", len(files), "files")
+```
+
+Topic Modeling
+I set k=6 to balance interpretability few enough topics to label with variety enough to separate major device themes.
+
+
+```{python}
+path = r"C:\Users\JacksonMcDowell\Desktop\Unstructured\final_data\combined_med_device.csv"
+df = pd.read_csv(path)
+
+if "text" not in df.columns:
+    df["text"] = (df["product"].astype(str) + " " + df["description"].astype(str)).str.lower()
+else:
+    df["text"] = df["text"].astype(str).str.lower()
+
+df = df.dropna(subset=["company", "text"]).copy()
+
+df["text_clean"] = (
+    df["text"]
+      .str.replace(r"\s+", " ", regex=True)
+      .str.replace(r"[^a-z\s]", " ", regex=True)  
+      .str.replace(r"\s+", " ", regex=True)
+      .str.strip()
+)
+df = df[df["text_clean"].str.split().str.len() >= 10].reset_index(drop=True)
+
+vectorizer = CountVectorizer(
+    stop_words=list(ENGLISH_STOP_WORDS), 
+    min_df=2,      
+    max_df=0.90    
+)
+
+X = vectorizer.fit_transform(df["text_clean"])
+vocab = vectorizer.get_feature_names_out()
+
+K = 6 
+model = lda.LDA(n_topics=K, n_iter=800, random_state=1)
+model.fit(X)
+
+topic_word = model.topic_word_
+n_top_words = 10
+
+for k, topic_dist in enumerate(topic_word):
+    top_idx = np.argsort(topic_dist)[-n_top_words:][::-1]
+    top_terms = vocab[top_idx]
+    print(f"Topic {k}: " + ", ".join(top_terms))
+
+doc_topic = model.doc_topic_ 
+for k in range(K):
+    df[f"topic_{k}"] = doc_topic[:, k]
+
+company_topic_means = df.groupby("company")[[f"topic_{k}" for k in range(K)]].mean()
+print(company_topic_means)
+
+for comp, row in company_topic_means.iterrows():
+    top = row.sort_values(ascending=False)
+    top_str = ", ".join([f"{t} ({v:.3f})" for t, v in top.items()])
+    print(f"Company: {comp}, Topics: {top_str}")
+```
+
+
+Visualization for presentation
+
+
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+company_topic_means = df.groupby("company")[[f"topic_{k}" for k in range(K)]].mean().reset_index()
+company_topic_means_melted = company_topic_means.melt(id_vars="company",
+                                                    var_name="topic",
+                                                    value_name="proportion")
+plt.figure(figsize=(10, 6))
+sns.barplot(data=company_topic_means_melted, x="company", y="proportion", hue="topic")
+plt.title("Average Topic Proportions by Company")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+```
